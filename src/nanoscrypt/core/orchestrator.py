@@ -89,6 +89,8 @@ class Orchestrator:
         input_data: str,
         requirements: list[str],
         cancellation_event: threading.Event | None,
+        sandbox_output_callback=None,
+        sandbox_operation_callback=None,
     ) -> ExecutionResult:
         """Run the blocking tool runtime off-loop and await process cleanup on cancel."""
         cancel_event = cancellation_event or threading.Event()
@@ -99,6 +101,16 @@ class Orchestrator:
                 input_data=input_data,
                 requirements=requirements,
                 cancellation_event=cancel_event,
+                sandbox_output_callback=(
+                    (lambda channel, text: sandbox_output_callback(channel, text))
+                    if sandbox_output_callback is not None
+                    else None
+                ),
+                sandbox_operation_callback=(
+                    (lambda operation_id: sandbox_operation_callback(operation_id))
+                    if sandbox_operation_callback is not None
+                    else None
+                ),
             )
         )
         try:
@@ -249,6 +261,38 @@ class Orchestrator:
             result = progress_callback(message)
             if hasattr(result, "__await__"):
                 await result
+
+        loop = asyncio.get_running_loop()
+
+        def report_sandbox_operation(operation_id: str) -> None:
+            if progress_callback is None:
+                return
+            from nanoscrypt.core.events import SandboxOperationEvent
+
+            async def publish() -> None:
+                callback = getattr(progress_callback, "sandbox_operation", None)
+                if callback is not None:
+                    result = callback(SandboxOperationEvent(operation_id=operation_id))
+                    if hasattr(result, "__await__"):
+                        await result
+
+            future = asyncio.run_coroutine_threadsafe(publish(), loop)
+            future.result(timeout=15)
+
+        def report_sandbox_output(channel: str, text: str) -> None:
+            if progress_callback is None:
+                return
+            from nanoscrypt.core.events import SandboxOutputEvent
+
+            async def publish() -> None:
+                callback = getattr(progress_callback, "sandbox_output", None)
+                if callback is not None:
+                    result = callback(SandboxOutputEvent(channel=channel, text=text))
+                    if hasattr(result, "__await__"):
+                        await result
+
+            future = asyncio.run_coroutine_threadsafe(publish(), loop)
+            future.result(timeout=15)
 
         # Check for Prefix Commands
         from nanoscrypt.core.command_router import PrefixCommandRouter
@@ -453,7 +497,12 @@ class Orchestrator:
             "reuse",
         ]
         prompt_lower = latest_request.lower()
-        has_action_intent = any(kw in prompt_lower for kw in action_keywords)
+        web_search_phrases = (
+            "search the web", "search web", "web search", "browse the web",
+            "search online", "look up online", "look online", "find online",
+        )
+        is_explicit_web_search = any(phrase in prompt_lower for phrase in web_search_phrases)
+        has_action_intent = any(kw in prompt_lower for kw in action_keywords) or is_explicit_web_search
         question_starters = (
             "who ", "what ", "when ", "where ", "why ", "how ",
             "is ", "are ", "am ", "do ", "does ", "did ",
@@ -471,6 +520,7 @@ class Orchestrator:
                 or ("@" in latest_request and not has_action_intent)
             )
             and not has_action_intent
+            and not is_explicit_web_search
         )
 
         if direct_tool_name:
@@ -544,7 +594,7 @@ class Orchestrator:
                 decision.action = "execute_pipeline"
 
         if decision.action not in ("reuse_tool", "execute_pipeline") and not decision.tool_name:
-            if any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt:
+            if (any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt) and not is_explicit_web_search:
                 if not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write ", "reuse ", "run "]):
                     log.info("forcing_direct_response_for_explanation_request", prompt=user_prompt)
                     decision.action = "direct_response"
@@ -1011,6 +1061,8 @@ class Orchestrator:
             input_data=tool_input,
             requirements=target_tool.requirements or [],
             cancellation_event=cancellation_event,
+            sandbox_output_callback=report_sandbox_output,
+            sandbox_operation_callback=report_sandbox_operation,
         )
         
         json_error = None
@@ -1091,6 +1143,8 @@ class Orchestrator:
                     input_data=tool_input,
                     requirements=target_tool.requirements or [],
                     cancellation_event=cancellation_event,
+                    sandbox_output_callback=report_sandbox_output,
+                    sandbox_operation_callback=report_sandbox_operation,
                 )
                 
                 json_error = None

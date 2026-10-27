@@ -1,0 +1,148 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\title{Version-Scoped Lifecycle Evidence for Reusable Agent Tools\\\large A Nanoscrypt Implementation Audit and Regression Study}
+\author{Nanoscrypt Research Team}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Reusable executable tools are mutable artifacts: their code changes, their environment changes, and outcome feedback may arrive after a new version is active. We identify a concrete Nanoscrypt defect in which version-filtered evidence updated a lifecycle row keyed only by tool, allowing delayed feedback for an old version to overwrite the new version's state. We implement version-keyed lifecycle records, conservative migration of legacy state, and shared-tool retrieval that checks the active version. Ten focused policy and asynchronous registry tests pass, including helpful and harmful late-feedback cases and a legacy migration case. The full repository suite reports 63 passed and 5 failed; the failures concern existing API test fixtures, CLI registry wiring, code-agent test doubles, and a Windows timeout return-code expectation. These tests establish a data-isolation property in one prototype, not improved task success, safety, or performance. Recent work already studies generated-tool conformance, harmful reusable skills, skill retirement, and verifier evolution. We make no novelty or first-of-its-kind claim. We present the invariant, implementation, regression evidence, limitations, and a research protocol for testing whether such isolation improves agent outcomes.
+\end{abstract}
+
+\section{Introduction}
+Agent systems now persist executable artifacts produced during problem solving. Reuse can reduce repeated work, but it also changes the risk profile of an agent: the artifact may be invoked on tasks for which it was not designed, its implementation may be replaced, or its dependencies and operating environment may change. Process-level success is insufficient evidence for continued reuse. A command can exit with code zero and still return a wrong result; a tool can improve one task family while degrading another.
+
+The operational question is therefore not simply whether a tool works. It is when evidence supports keeping a particular version available, when it supports repair or restricted use, and when it supports retirement. Any such policy must account for outcome attribution, task diversity, version changes, distribution shift, and uncertainty. These concerns overlap substantially with recent studies of generated-tool-library conformance, harmful reusable skills, and contribution-based skill retirement. We do not claim that lifecycle governance for AI-generated artifacts is new.
+
+We examine Nanoscrypt as a concrete prototype. Its code records caller-provided helpful, neutral, or harmful outcomes and uses a threshold policy to change a tool's lifecycle state. We found a mismatch between version-filtered outcome aggregation and tool-wide lifecycle state. The work reported here repairs that mismatch and tests a specific invariant: adding or changing outcomes for version $v_1$ must not change the lifecycle state or availability of version $v_2$.
+
+This paper makes three limited contributions:
+\begin{enumerate}[leftmargin=*]
+  \item A code-level defect report and implementation of version-keyed lifecycle state with conservative legacy migration.
+  \item Regression tests for late helpful/harmful evidence and shared retrieval across a version transition.
+  \item A falsifiable paired-evaluation protocol for testing user-level utility under version regression and environment drift; those experiments remain future work.
+\end{enumerate}
+The central research question is: \emph{Does a version-isolated lifecycle policy based on paired, externally verified task outcomes reduce harmful reuse without discarding useful tools, compared with fixed-label thresholds and keep-all or regenerate baselines?} This remains an open empirical question.
+
+\section{Background and Related Work}
+\paragraph{Generated tool libraries.}
+EvolveTool-Bench, whose revised paper is titled \emph{Beyond Task Completion: A Verification-vs.-Conformance Gap in Tool-Evolving Agents}, argues that task completion can fail to reveal whether synthesized tools conform on held-out inputs. It preserves tool source and replays tools against conformance suites, and reports that task-level success alone can miss library quality problems \cite{evolvetool}. This work is directly adjacent to our motivation and establishes held-out tool conformance as a minimum comparison, not a novel contribution of this paper.
+
+\paragraph{Skill contribution and retirement.}
+Ratchet studies contribution-based skill eviction, library-size constraints, judge error, and the conditions under which a noisy judge can fail to retire harmful entries \cite{ratchet}. Its follow-up, Double Ratchet, pairs a lifecycle-managed skill loop with an evolving verifier and reports that downstream task scores alone cannot certify verifier quality \cite{doubleratchet}. These works directly address lifecycle and evidence quality. Although their managed artifacts are skills rather than versioned executable tools, a distinct contribution must be demonstrated beyond renaming keep/retire decisions.
+
+\paragraph{Attributing harmful reuse.}
+\emph{Agent Skills Can Be Harmful} uses differential comparisons between skill-guided runs and no-skill or matched-skill reference runs to attribute functional failures and efficiency regressions \cite{skillharm}. This is close to the paired-evaluation principle proposed here. Our experiment must compare against this approach and explain whether version-level tool governance adds measurable value.
+
+\paragraph{Skill effectiveness benchmarks.}
+SkillsBench evaluates curated and self-generated skills across tasks with deterministic verifiers and finds that skill effects vary across tasks; some tasks regress even when average performance improves \cite{skillsbench}. This supports reporting task-family and per-task effects rather than only a pooled average. LOTS separately learns persistent task-specific tool spaces from output likelihood evidence \cite{lots}. Its goal is selection and tool-space composition; the proposed study concerns lifecycle decisions over executable versions, but overlap must be assessed in a full paper comparison.
+
+\paragraph{Positioning.}
+The closest literature already covers library conformance, harmful reuse attribution, lifecycle retirement, and (in Double Ratchet) lifecycle-managed skills paired with evolved verifiers. LOTS also learns persistent task-specific tool spaces from output evidence. Our implementation contribution is narrower: a database and retrieval invariant that scopes lifecycle decisions to immutable executable versions, including when old feedback arrives late. This is a reliability correction in one prototype, not evidence of a new general lifecycle algorithm. Whether this specific invariant changes agent task outcomes remains an open empirical question. The related-work search is targeted rather than systematic, so no novelty claim is made.
+
+\section{Nanoscrypt Prototype Audit}
+\subsection{Current policy}
+The function \texttt{decide\_lifecycle\_state} in Nanoscrypt's \texttt{core/tool\_lifecycle.py} accepts a current state and a sequence of task-key/contribution pairs. Its current rules are:
+\begin{itemize}[leftmargin=*]
+  \item A candidate becomes shared after at least five outcomes, at least three distinct non-empty task keys, and a helpful-label fraction of at least 0.8.
+  \item A candidate or needs-improvement tool is quarantined after at least three harmful outcomes across at least two distinct keys.
+  \item A shared tool moves to needs-improvement after at least two harmful outcomes among the latest five, and to quarantined after at least three.
+  \item Retired and quarantined states are held until explicit review. Neutral labels affect the denominator but do not count as helpful or harmful.
+\end{itemize}
+These are fixed heuristics, not calibrated statistical decisions. The keys are caller-provided labels; they are not guaranteed to be independently defined task families. The outcome contribution and evidence are also caller supplied, rather than computed from paired verified runs.
+
+\subsection{Version-isolation finding and repair}
+Before this change, the registry queried outcomes by tool and execution version but stored lifecycle state in \texttt{DBToolLifecycle}, whose primary key was only \texttt{tool\_id}. Registering a new version reset that shared row; delayed feedback for an older execution could then recompute the old version's evidence and overwrite the state used for the new version. We reproduced this risk with registry-level tests.
+
+We added \texttt{DBToolVersionLifecycle}, keyed by $(\texttt{tool\_id},\texttt{version})$. Registration starts each new version as a candidate. Outcome recording updates only the lifecycle row matching the version recorded on the execution. Shared retrieval joins the lifecycle row for \texttt{current\_version} and requires the state to equal \texttt{shared}. The API can inspect a selected version, and manual lifecycle updates can target a selected version. During migration, old outcomes are re-evaluated separately for each version; an unattributed legacy shared label does not grant a version shared access without version-specific evidence. The old table remains available for compatibility and is not dropped.
+
+This enforces database-state noninterference for version identity in the tested paths. It does not isolate evidence by dependency hash, runtime environment, task family, or verifier version. Nor does the test establish that the labels themselves are valid or causal.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{0.27\linewidth}p{0.63\linewidth}}
+\toprule
+Aspect & Observed implementation \\
+\midrule
+Outcome attribution & Explicit labels and text evidence are recorded; no paired tool-available/tool-withheld outcome is computed. \\
+Promotion policy & Fixed minimum counts, task-key diversity, and helpful fraction. \\
+Version scope & Fixed in this work: outcome aggregation, lifecycle state, and current-version retrieval are version-scoped. \\
+Action space & Candidate, shared, needs-improvement, quarantined, and retired appear in the policy; retirement requires an explicit operator state change. \\
+Uncertainty and drift & No confidence interval, abstention threshold, or environment/change-point representation is present in the inspected policy. \\
+\bottomrule
+\end{tabular}
+\caption{Code-level audit of the inspected Nanoscrypt lifecycle implementation.}
+\end{table}
+
+\section{Research Questions and Hypotheses}
+\textbf{RQ1:} Does version-isolated lifecycle control using paired, externally verified outcomes improve task utility relative to Nanoscrypt's fixed-label policy and keep-all or no-persistence baselines?
+
+\textbf{RQ2:} Does conditioning decisions on task family reduce harmful reuse when a tool is useful in one family but harmful in a neighboring family?
+
+\textbf{RQ3:} Under deliberate code-version regression and environment drift, how quickly do policies detect harm, and what useful capability do they unnecessarily isolate or retire?
+
+The prospective hypotheses are: (H1) paired verified evidence improves promotion precision; (H2) version isolation reduces harmful reuse after a version change; (H3) task-family conditioning reduces local harm without excessive tool retirement; and (H4) any benefit remains after accounting for replay, verification, and latency costs. These hypotheses are not supported by the tests reported below.
+
+\section{Proposed Evaluation Method}
+\subsection{Benchmark construction}
+Construct a sequential benchmark of generated executable tools and deterministic task instances in at least three domains, such as structured data conversion, numerical computation, and file transformation. Each tool should have immutable source and dependency hashes. Each domain should contain (i) recurring tasks where reuse is expected to help, (ii) near-neighbor tasks that test overgeneralization, (iii) a deliberately regressed tool version, and (iv) an environment or dependency change. Include at least one compositional setting, but report it separately because withholding an upstream tool may alter downstream inputs.
+
+Task instances must have externally checkable correctness conditions. For every task, run matched conditions from the same initial workspace and seed: (A) tool available and selected under the policy being evaluated; and (B) the candidate tool withheld, allowing the baseline agent or alternative capability to solve the task. Randomize order where feasible. Preserve full traces, verifier outputs, source and environment hashes, and budgets. Use multiple seeds and report confidence intervals; do not treat repeated executions of one task instance as independent task families.
+
+\subsection{Compared policies}
+Compare (1) keep-all, (2) no persistent reuse/regenerate, (3) the Nanoscrypt fixed-threshold policy using its documented labels, (4) a faithful paired differential-attribution baseline inspired by harmful-skill attribution, and (5) the proposed version- and task-conditioned lifecycle policy. Implement policy 5 only after specifying its estimation method, uncertainty rule, drift response, and thresholds before looking at held-out results. Include Ratchet and EvolveTool-Bench-style comparisons where faithful adaptation is possible; document differences rather than claiming exact replication if artifact or model types differ.
+
+\subsection{Counterfactual utility}
+For task instance $x$, executable version $v$, and fixed initial conditions, define
+\[
+  \Delta_v(x) = U(x\mid v\text{ available}) - U(x\mid v\text{ withheld}),
+\]
+where $U$ is derived from task correctness and prespecified resource or risk costs. Correctness should come from deterministic tests or domain-specific verifiers wherever possible. Human or model judgments may supplement the verifier but must be reported separately, with adjudication and agreement. The intervention is not cleanly identifiable when the agent changes its whole plan in response to availability; record this as a behavioral treatment effect of policy availability, not a pure isolated code effect.
+
+\subsection{Metrics}
+Primary outcomes should include verified task utility, harmful-reuse rate, promotion precision, and time-to-detection after a deliberate regression. Secondary outcomes include missed harmful versions, unnecessary isolation/retirement of beneficial versions, abstention rate, verifier coverage, per-family utility, reuse rate, registry size, token and execution cost, and end-to-end latency. Report unverified tasks and missing outcomes rather than silently dropping them. Do not collapse efficacy, safety, and cost into one score without a prespecified weighting rationale.
+
+\subsection{Analysis}
+Use task-instance paired differences for the main utility comparison, with confidence intervals clustered by task family and tool version. Report per-family distributions and error cases. Evaluate promotion labels against held-out estimates of version utility; avoid evaluating against the same outcomes that triggered the lifecycle decision. For calibration, group decisions by predicted uncertainty and assess whether observed error rates track the stated confidence. Run ablations removing version identity, task-family conditioning, paired baselines, and drift handling. Report seeds, versions, exact prompts, budgets, verifier code, and exclusions.
+
+\section{Prototype Test Results}
+The focused command
+\begin{quote}\ttfamily python -m pytest -q --import-mode=importlib tests/unit/test\_tool\_lifecycle.py tests/unit/test\_registry.py\end{quote}
+completed with \textbf{10 passed, 0 failed} in 1.10 seconds on 14 October 2026. Six pure policy cases cover no-evidence retention, threshold promotion, harmful shared review/quarantine, cross-family candidate quarantine, and retirement preservation. Four asynchronous registry cases cover late helpful and harmful feedback, migration from a legacy shared label without version-specific evidence, and existing registry behavior. Tests assert that old-version feedback does not change new-version state and that a candidate is excluded from shared-only retrieval. Two deprecation warnings originate from the Windows event-loop policy configured in \texttt{tests/conftest.py}.
+
+The full command \texttt{python -m pytest -q --import-mode=importlib} completed with \textbf{63 passed, 5 failed} in 42.75 seconds. The failures were: (1) an API endpoint test whose mock orchestrator lacks \texttt{runtime\_manager}; (2) a CLI test whose async invocation does not observe its seeded registry; (3--4) two code-agent tests whose mock registry's \texttt{search} does not accept the production \texttt{shared\_only} keyword; and (5) a Windows runtime timeout test expecting return code $-9$ while the implementation returned 1 with \texttt{timed\_out=True}. These files were not changed as part of the lifecycle patch. The full-suite failures prevent claiming a clean release.
+
+\paragraph{Interpretation.} These results establish tested version-state isolation and conservative migration in this implementation. They do not evaluate tool correctness, counterfactual utility, policy calibration, production safety, agent behavior, or any claimed improvement in task success, latency, cost, or harmful-reuse rates. No agent-task benchmark has been run.
+
+\section{Threats to Validity and Limitations}
+First, caller-entered helpfulness is not a causal outcome and may be noisy or biased. Second, task keys may not identify independent task families. Third, this patch does not scope evidence by dependencies, environment, task family, or verifier version. Fourth, it tests state isolation but not agent performance or real-world safety. Fifth, paired availability can change an agent plan, making the estimand a policy-level effect rather than a direct code-only effect. Sixth, five full-suite failures need resolution before treating the repository as release-clean. Finally, the literature review is targeted, not systematic; new related work appeared within days of this draft, illustrating the need for an updated review before submission.
+
+\section{Conclusion}
+Nanoscrypt now binds outcome-driven lifecycle state to the version that produced the evidence, and focused tests show delayed feedback does not alter a different active version. This is a verified software invariant in one prototype, not evidence about agent effectiveness. Closely related research already addresses skill retirement and co-evolving verifiers, while tool-library conformance and harmful-reuse studies overlap the broader motivation. An empirical claim will require the preregistered paired benchmark, stronger environment fingerprints, a clean full test suite, and a systematic literature review. We make no claim that the idea is unprecedented.
+
+\begin{thebibliography}{9}
+\bibitem{evolvetool}
+A. Kaliyev and A. Maryanskyy, ``Beyond Task Completion: A Verification-vs.-Conformance Gap in Tool-Evolving Agents,'' arXiv:2604.00392, version 2, 2026. Available: \url{https://arxiv.org/abs/2604.00392}.
+
+\bibitem{ratchet}
+X. Zhang, Y. Cui, G. Wang, Z. Li, W. Qiu, B. Zhu, and P. He, ``Ratchet: How Reliable Must an LLM Judge Be to Retire a Skill?,'' arXiv:2605.22148, version 3, 2026. Available: \url{https://arxiv.org/abs/2605.22148}.
+
+\bibitem{skillharm}
+G. Dong, Y. Gao, L. Li, T. Xu, Y. Hua, and F. Yang, ``Agent Skills Can Be Harmful: An Empirical Study of Skill-Induced Failures in LLM Agents,'' arXiv:2608.11888, 2026. Available: \url{https://arxiv.org/abs/2608.11888}.
+
+\bibitem{skillsbench}
+X. Li et al., ``SkillsBench: Benchmarking How Well Agent Skills Work Across Diverse Tasks,'' arXiv:2602.12670, version 4, 2026. Available: \url{https://arxiv.org/abs/2602.12670}.
+
+\bibitem{lots}
+X. Zhang et al., ``Self-Evolving Agents via Likelihood-Guided Tool-Space Optimization,'' arXiv:2609.34151, 2026. Available: \url{https://arxiv.org/abs/2609.34151}.
+\bibitem{doubleratchet}
+X. Zhang, G. Wang, Y. Cui, Z. Li, W. Qiu, B. Zhu, and P. He, ``Who Verifies the Verifier? Co-Evolving Inspectable Graders with Self-Improving Agents,' arXiv:2610.11464, 2026. Available: \url{https://arxiv.org/abs/2610.11464}.
+\end{thebibliography}
+
+\end{document}

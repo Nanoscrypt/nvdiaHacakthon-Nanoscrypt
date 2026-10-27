@@ -31,6 +31,21 @@ class ProgressEvent(AgentEvent):
     message: str
 
 
+class SandboxOperationEvent(AgentEvent):
+    """The Nebius operation identifier for a submitted sandbox run."""
+
+    type: Literal["sandbox_operation"] = "sandbox_operation"
+    operation_id: str
+
+
+class SandboxOutputEvent(AgentEvent):
+    """A stdout/stderr chunk received live from a remote sandbox."""
+
+    type: Literal["sandbox_output"] = "sandbox_output"
+    channel: Literal["stdout", "stderr"]
+    text: str
+
+
 class MessageStartEvent(AgentEvent):
     type: Literal["message_start"] = "message_start"
     message_role: str

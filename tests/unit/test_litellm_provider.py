@@ -40,3 +40,31 @@ async def test_generate_structured_passes_configured_api_credentials(monkeypatch
     assert result == StructuredAnswer(answer="ok")
     assert request_kwargs["api_key"] == "test-nvidia-api-key"
     assert request_kwargs["api_base"] == "https://example.invalid/v1"
+
+
+def test_nebius_environment_key_selects_token_factory_endpoint(monkeypatch):
+    monkeypatch.setenv("NEBIUS_API_KEY", "test-nebius-key")
+    monkeypatch.setattr(settings.llm, "api_key", None)
+    monkeypatch.setattr(settings.llm, "api_base", None)
+    monkeypatch.setattr(settings, "nebius_api_key", None)
+    request_kwargs = {}
+
+    LiteLLMProvider._inject_llm_credentials(
+        request_kwargs, "nebius/zai-org/GLM-5.2"
+    )
+
+    assert request_kwargs["api_key"] == "test-nebius-key"
+    assert request_kwargs["api_base"] == "https://api.tokenfactory.nebius.com/v1"
+
+
+def test_nebius_key_does_not_override_non_nebius_model_endpoint(monkeypatch):
+    monkeypatch.setenv("NEBIUS_API_KEY", "test-nebius-key")
+    monkeypatch.setattr(settings.llm, "api_key", None)
+    monkeypatch.setattr(settings.llm, "api_base", None)
+    monkeypatch.setattr(settings, "nebius_api_key", None)
+    request_kwargs = {}
+
+    LiteLLMProvider._inject_llm_credentials(request_kwargs, "gpt-4o-mini")
+
+    assert request_kwargs["api_key"] == "test-nebius-key"
+    assert "api_base" not in request_kwargs

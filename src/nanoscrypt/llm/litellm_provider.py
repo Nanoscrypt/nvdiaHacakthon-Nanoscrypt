@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import os
 import re
 from typing import Any
 
@@ -60,11 +61,22 @@ class LiteLLMProvider(LLMProvider):
             return 0.0
 
     @staticmethod
-    def _inject_llm_credentials(kwargs: dict[str, Any]) -> None:
-        if "api_key" not in kwargs and settings.llm.api_key:
-            kwargs["api_key"] = settings.llm.api_key
-        if "api_base" not in kwargs and settings.llm.api_base:
-            kwargs["api_base"] = settings.llm.api_base
+    def _inject_llm_credentials(kwargs: dict[str, Any], model: str) -> None:
+        # Token Factory uses an OpenAI-compatible endpoint. Keep its key separate
+        # from provider-specific credentials so a Nebius key is never sent to a
+        # different provider by accident.
+        nebius_key = os.getenv("NEBIUS_API_KEY") or settings.nebius_api_key
+        if "api_key" not in kwargs:
+            api_key = settings.llm.api_key or nebius_key
+            if api_key:
+                kwargs["api_key"] = api_key
+
+        if "api_base" not in kwargs:
+            api_base = settings.llm.api_base
+            if not api_base and nebius_key and model.startswith(("nebius/", "openai/")):
+                api_base = "https://api.tokenfactory.nebius.com/v1"
+            if api_base:
+                kwargs["api_base"] = api_base
 
     async def _execute_with_retry(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         """Executes LiteLLM completion calls with automatic backoff and fallback model rotation."""
@@ -118,7 +130,7 @@ class LiteLLMProvider(LLMProvider):
         # Execute completion inside the retry context
         if "timeout" not in kwargs:
             kwargs["timeout"] = 1800.0
-        self._inject_llm_credentials(kwargs)
+        self._inject_llm_credentials(kwargs, model)
 
         # Only stream user-facing text when a callback is explicitly provided.
         # Internal planner/generator calls continue to receive a normal response.
@@ -282,7 +294,7 @@ class LiteLLMProvider(LLMProvider):
 
         if "timeout" not in kwargs:
             kwargs["timeout"] = 1800.0
-        self._inject_llm_credentials(kwargs)
+        self._inject_llm_credentials(kwargs, model)
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,

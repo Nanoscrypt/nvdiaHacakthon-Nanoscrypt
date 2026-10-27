@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from nanoscrypt.api.dependencies import get_registry
 from nanoscrypt.api.schemas import ToolLifecycleAction, ToolOutcomeSubmit, ToolResponse
@@ -27,8 +27,12 @@ async def submit_tool_outcome(
 
 
 @router.get("/{name}/lifecycle")
-async def get_tool_lifecycle(name: str, registry: ToolRegistry = Depends(get_registry)):
-    result = await registry.get_lifecycle(name)
+async def get_tool_lifecycle(
+    name: str,
+    version: int | None = Query(default=None, ge=1),
+    registry: ToolRegistry = Depends(get_registry),
+):
+    result = await registry.get_lifecycle(name, version=version)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
     return result
@@ -40,10 +44,12 @@ async def update_tool_lifecycle(
     payload: ToolLifecycleAction,
     registry: ToolRegistry = Depends(get_registry),
 ):
-    updated = await registry.set_lifecycle_state(name, payload.state, payload.reason)
+    updated = await registry.set_lifecycle_state(
+        name, payload.state, payload.reason, version=payload.version
+    )
     if not updated:
         raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
-    return await registry.get_lifecycle(name)
+    return await registry.get_lifecycle(name, version=payload.version)
 
 
 @router.get("", response_model=list[ToolResponse])

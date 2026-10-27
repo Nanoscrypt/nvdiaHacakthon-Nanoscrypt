@@ -86,6 +86,16 @@ async def run_agent_loop(
 
                     await harness.emit_event(ProgressEvent(message=message))
 
+            if harness is not None:
+                async def report_sandbox_output(event) -> None:
+                    await harness.emit_event(event)
+
+                async def report_sandbox_operation(event) -> None:
+                    await harness.emit_event(event)
+
+                report_progress.sandbox_output = report_sandbox_output
+                report_progress.sandbox_operation = report_sandbox_operation
+
             session.active_prompt = next_prompt
             session.conversation_history.append(
                 {"role": "user", "content": next_prompt}

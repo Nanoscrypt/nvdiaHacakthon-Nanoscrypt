@@ -34,6 +34,12 @@ Instead of relying on brittle, predefined toolsets, Nanoscrypt:
 
 ---
 
+## Nebius Token Factory (hackathon setup)
+
+Nanoscrypt can send inference requests to Nebius Token Factory using its OpenAI-compatible API and an NVIDIA model enabled for your project. Create a local `.env` from `.env.example`, then set `NEBIUS_API_KEY` and set `NANOSCRYPT_LLM__MODEL` to `nebius/<exact-model-id>` from your Token Factory catalog. The local `.env` file is loaded by Nanoscrypt; the key must not be committed. The default Token Factory endpoint is `https://api.tokenfactory.nebius.com/v1`.
+
+After configuring a model ID, run `python examples/nebius_smoke.py` to make one live inference call. This verifies model access only. Once Nebius Sandboxes beta access is enabled, install the optional integration with `pip install -e ".[nebius]"` on Python 3.12, set `NEBIUS_PROJECT_ID`, and set `NANOSCRYPT_RUNTIME__EXECUTION_BACKEND=nebius_sandbox` to route generated-tool execution through Token Factory Sandboxes. The default backend remains local. Sandbox runs are disposable; the CLI now displays stdout and stderr live from Nebius SSE, then reports the final execution result and exit code. The in-process interactive code-agent loop remains local for now; its RPC-driven process needs a separate streaming/session adapter before it can run remotely.
+
 ##  Quickstart
 
 ### 1. Installation
@@ -177,7 +183,7 @@ Content-Type: application/json
 }
 ```
 
-The contribution must be `helpful`, `neutral`, or `harmful`. Use a stable task key for each distinct task family. Candidate tools become shared after at least five reviews across three distinct task keys, with at least 80% marked helpful. Repeated harmful feedback moves a candidate to quarantine or a shared tool to review. The current state and reason are available from `GET /api/v1/tools/{name}/lifecycle`; `PUT` on that path lets an operator quarantine, retire, or return a tool to candidate review. Only accumulated outcome evidence can promote a tool to shared. Lifecycle evidence applies to a specific tool version.
+The contribution must be `helpful`, `neutral`, or `harmful`. Use a stable task key for each distinct task family. Candidate versions become shared after at least five reviews across three distinct task keys, with at least 80% marked helpful. Repeated harmful feedback moves a candidate version to quarantine or a shared version to review. Lifecycle evidence and state are stored per tool version; late feedback for an older version cannot promote or quarantine the current version. The current version's state and reason are available from `GET /api/v1/tools/{name}/lifecycle`. Add `?version={n}` to inspect an older version. `PUT` on that path lets an operator quarantine, retire, or return a selected version to candidate review; omit `version` to target the current version. Only accumulated outcome evidence can promote a candidate version to shared. Existing tool-level outcomes are evaluated separately for each version during migration. A legacy shared label without version-specific evidence does not grant shared access; a legacy quarantine or retirement is preserved for the current version.
 
 Task responses include `execution_id` so clients can attach outcome feedback. Feedback is optional; until enough evidence is supplied, a new tool remains available for its generating run but is not offered for reuse in later plans.
 

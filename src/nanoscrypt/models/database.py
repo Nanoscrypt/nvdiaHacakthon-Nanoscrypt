@@ -55,6 +55,9 @@ class DBTool(Base):
         "DBToolLifecycle", back_populates="tool", uselist=False,
         cascade="all, delete-orphan"
     )
+    version_lifecycles = relationship(
+        "DBToolVersionLifecycle", back_populates="tool", cascade="all, delete-orphan"
+    )
 
 
 class DBToolVersion(Base):
@@ -97,7 +100,7 @@ class DBToolExecution(Base):
 
 
 class DBToolLifecycle(Base):
-    """Evidence-based availability state, separate from tool execution status."""
+    """Legacy tool-level lifecycle state retained for database migration."""
 
     __tablename__ = "tool_lifecycle"
 
@@ -109,6 +112,22 @@ class DBToolLifecycle(Base):
         onupdate=lambda: datetime.now(timezone.utc), nullable=False
     )
     tool = relationship("DBTool", back_populates="lifecycle")
+
+
+class DBToolVersionLifecycle(Base):
+    """Availability state bound to one immutable tool version."""
+
+    __tablename__ = "tool_version_lifecycles"
+
+    tool_id = Column(Integer, ForeignKey("tools.id"), primary_key=True)
+    version = Column(Integer, primary_key=True)
+    state = Column(String, default="candidate", nullable=False)
+    reason = Column(Text, default="Awaiting task-outcome evidence", nullable=False)
+    updated_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    tool = relationship("DBTool", back_populates="version_lifecycles")
 
 
 class DBToolOutcome(Base):

@@ -258,11 +258,15 @@ def run_cmd(
 
         import shutil
 
-        capsem_active = getattr(settings.runtime, "capsem_enabled", False) and bool(shutil.which("capsem"))
-        if getattr(settings.runtime, "capsem_enabled", False):
+        capsem_enabled = getattr(settings.runtime, "capsem_enabled", False)
+        capsem_active = capsem_enabled and bool(shutil.which("capsem"))
+        execution_backend = getattr(settings.runtime, "execution_backend", "local")
+        if execution_backend == "nebius_sandbox":
+            sandbox_lbl = "Nebius Token Factory"
+        elif capsem_enabled:
             sandbox_lbl = "CapSem" if capsem_active else "CapSem unavailable (execution blocked)"
         else:
-            sandbox_lbl = "Disabled"
+            sandbox_lbl = "Local execution"
 
         console.print()
         console.print(
@@ -315,8 +319,19 @@ def run_cmd(
                 session_store=session_store,
             )
 
+            # Setup the progress display before approval handling so it can be
+            # paused while the terminal waits for a visible y/n response.
+            has_printed_response_header = False
+            status = console.status("Thinking…", spinner="dots")
+            status.start()
+            status_active = True
+
             # Setup interactive console approval handler
             def cli_approval_callback(req: ApprovalRequest) -> bool:
+                nonlocal status_active
+                if status_active:
+                    status.stop()
+                    status_active = False
                 console.print()
 
                 # Risk level color determination
@@ -350,17 +365,16 @@ def run_cmd(
                 console.print()
                 approved = typer.confirm("Do you authorize this action?", default=False)
                 console.print()
+                if approved:
+                    status.update("Continuing after approval…")
+                    status.start()
+                    status_active = True
                 return approved
 
             # Register the approval callback
             orchestrator.approval_gate.approval_callback = cli_approval_callback
 
             # Event listener for real-time progress events
-            has_printed_response_header = False
-            status = console.status("Thinking…", spinner="dots")
-            status.start()
-            status_active = True
-
             def event_listener(event):
                 nonlocal has_printed_response_header, status_active
                 if event.type == "thinking_delta":
@@ -369,6 +383,24 @@ def run_cmd(
                     status.update("Thinking…")
                 elif event.type == "progress":
                     status.update(event.message)
+                elif event.type == "sandbox_operation":
+                    console.print(
+                        f"[dim]Nebius operation UUID: {event.operation_id}[/dim]",
+                        markup=True,
+                        highlight=False,
+                    )
+                    console.file.flush()
+                elif event.type == "sandbox_output":
+                    status.update("Receiving sandbox output…")
+                    style = "red" if event.channel == "stderr" else None
+                    console.print(
+                        event.text,
+                        end="",
+                        markup=False,
+                        highlight=False,
+                        style=style,
+                    )
+                    console.file.flush()
                 elif event.type == "tool_execution_start":
                     status.update(f"Running {event.tool_name}…")
                 elif event.type == "tool_execution_end":

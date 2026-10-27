@@ -32,6 +32,8 @@ class RuntimeSettings(BaseModel):
     use_venv: bool = False  # Set to False to run directly with sys.executable (no isolated venv)
     capsem_enabled: bool = False
     code_agent_enabled: bool = False
+    execution_backend: str = "local"  # local or nebius_sandbox
+    nebius_sandbox_image: str = "python:3.12-slim"
 
 
 class RegistrySettings(BaseModel):
@@ -86,9 +88,17 @@ class MemMachineSettings(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="NANOSCRYPT_", env_nested_delimiter="__", extra="ignore"
+        env_prefix="NANOSCRYPT_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
+    nebius_api_key: str | None = Field(default=None, validation_alias="NEBIUS_API_KEY")
+    nebius_project_id: str | None = Field(
+        default=None, validation_alias="NEBIUS_PROJECT_ID"
+    )
     llm: LLMSettings = Field(default_factory=LLMSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     registry: RegistrySettings = Field(default_factory=RegistrySettings)

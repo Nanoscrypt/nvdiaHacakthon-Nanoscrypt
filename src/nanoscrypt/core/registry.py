@@ -13,6 +13,7 @@ from nanoscrypt.models.database import (
     DBToolLifecycle,
     DBToolOutcome,
     DBToolVersion,
+    DBToolVersionLifecycle,
 )
 from nanoscrypt.models.tool import GeneratedTool
 
@@ -41,6 +42,76 @@ class ToolRegistry:
 
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await self._migrate_legacy_lifecycle_states()
+
+    async def _migrate_legacy_lifecycle_states(self) -> None:
+        """Move legacy tool-wide lifecycle state into version-scoped rows.
+
+        Old databases have one lifecycle row per tool. New rows are derived from
+        each version's own outcomes so evidence cannot silently cross versions.
+        Unattributed legacy state is not enough to share a version safely.
+        """
+        async with self.session_factory() as session, session.begin():
+            result = await session.execute(select(DBTool))
+            tools = list(result.scalars().all())
+            for tool in tools:
+                legacy = await session.get(DBToolLifecycle, tool.id)
+                version_result = await session.execute(
+                    select(DBToolVersion.version)
+                    .where(DBToolVersion.tool_id == tool.id)
+                    .order_by(DBToolVersion.version)
+                )
+                versions = set(version_result.scalars().all())
+                versions.add(tool.current_version)
+
+                for version in sorted(versions):
+                    existing = await session.get(
+                        DBToolVersionLifecycle, (tool.id, version)
+                    )
+                    if existing is not None:
+                        continue
+
+                    outcomes = await self._get_version_outcomes(
+                        session, tool.id, version
+                    )
+                    if (
+                        legacy is not None
+                        and version == tool.current_version
+                        and legacy.state in {"quarantined", "retired"}
+                    ):
+                        state, reason = legacy.state, legacy.reason
+                    else:
+                        state, reason = decide_lifecycle_state(
+                            "candidate", outcomes
+                        )
+                        reason = f"Migrated per version: {reason}"
+
+                    session.add(
+                        DBToolVersionLifecycle(
+                            tool_id=tool.id,
+                            version=version,
+                            state=state,
+                            reason=reason,
+                        )
+                    )
+
+    @staticmethod
+    async def _get_version_outcomes(
+        session: AsyncSession, tool_id: int, version: int
+    ) -> list[tuple[str, str]]:
+        result = await session.execute(
+            select(DBToolOutcome.task_key, DBToolOutcome.contribution)
+            .join(
+                DBToolExecution,
+                DBToolExecution.id == DBToolOutcome.execution_id,
+            )
+            .where(
+                DBToolExecution.tool_id == tool_id,
+                DBToolExecution.version == version,
+            )
+            .order_by(DBToolOutcome.created_at.asc(), DBToolOutcome.id.asc())
+        )
+        return list(result.all())
 
     async def register(
         self,
@@ -81,8 +152,9 @@ class ToolRegistry:
                     # Flush to get the tool ID
                     await session.flush()
                     session.add(
-                        DBToolLifecycle(
+                        DBToolVersionLifecycle(
                             tool_id=db_tool.id,
+                            version=1,
                             state="candidate",
                             reason="Awaiting task-outcome evidence",
                         )
@@ -97,18 +169,14 @@ class ToolRegistry:
                     db_tool.dependencies = list(
                         set(db_tool.dependencies + tool.manifest.dependencies)
                     )
-                    lifecycle = await session.get(DBToolLifecycle, db_tool.id)
-                    if lifecycle:
-                        lifecycle.state = "candidate"
-                        lifecycle.reason = "New version must earn shared status"
-                    else:
-                        session.add(
-                            DBToolLifecycle(
-                                tool_id=db_tool.id,
-                                state="candidate",
-                                reason="New version must earn shared status",
-                            )
+                    session.add(
+                        DBToolVersionLifecycle(
+                            tool_id=db_tool.id,
+                            version=version_num,
+                            state="candidate",
+                            reason="New version must earn shared status",
                         )
+                    )
 
                 # Add version snapshot details
                 db_version = DBToolVersion(
@@ -168,13 +236,14 @@ class ToolRegistry:
             if shared_only:
                 stmt = (
                     select(DBTool)
-                    .outerjoin(DBToolLifecycle, DBToolLifecycle.tool_id == DBTool.id)
+                    .outerjoin(
+                        DBToolVersionLifecycle,
+                        (DBToolVersionLifecycle.tool_id == DBTool.id)
+                        & (DBToolVersionLifecycle.version == DBTool.current_version),
+                    )
                     .where(
                         DBTool.status == "active",
-                        or_(
-                            DBToolLifecycle.state == "shared",
-                            DBToolLifecycle.tool_id.is_(None),
-                        ),
+                        DBToolVersionLifecycle.state == "shared",
                         or_(
                             DBTool.name.like(like_pattern),
                             DBTool.purpose.like(like_pattern),
@@ -256,7 +325,11 @@ class ToolRegistry:
         contribution: str,
         evidence: str,
     ) -> dict | None:
-        """Record explicit task-level feedback and update the tool's lifecycle state."""
+        """Record task-level feedback and update only the executed version's state."""
+        if contribution not in {"helpful", "neutral", "harmful"}:
+            raise ValueError("Contribution must be helpful, neutral, or harmful")
+        if not task_key.strip():
+            raise ValueError("Task key must not be empty")
         async with self.session_factory() as session:
             async with session.begin():
                 execution = await session.get(DBToolExecution, execution_id)
@@ -272,12 +345,16 @@ class ToolRegistry:
                         "An outcome has already been recorded for this execution"
                     )
 
-                lifecycle = await session.get(DBToolLifecycle, execution.tool_id)
+                lifecycle = await session.get(
+                    DBToolVersionLifecycle,
+                    (execution.tool_id, execution.version),
+                )
                 if lifecycle is None:
-                    lifecycle = DBToolLifecycle(
+                    lifecycle = DBToolVersionLifecycle(
                         tool_id=execution.tool_id,
-                        state="shared",
-                        reason="Existing tool treated as shared pending new evidence",
+                        version=execution.version,
+                        state="candidate",
+                        reason="Version requires its own lifecycle evidence",
                     )
                     session.add(lifecycle)
                     await session.flush()
@@ -292,19 +369,9 @@ class ToolRegistry:
                 )
                 await session.flush()
 
-                result = await session.execute(
-                    select(DBToolOutcome.task_key, DBToolOutcome.contribution)
-                    .join(
-                        DBToolExecution,
-                        DBToolExecution.id == DBToolOutcome.execution_id,
-                    )
-                    .where(
-                        DBToolExecution.tool_id == execution.tool_id,
-                        DBToolExecution.version == execution.version,
-                    )
-                    .order_by(DBToolOutcome.created_at.asc(), DBToolOutcome.id.asc())
+                outcomes = await self._get_version_outcomes(
+                    session, execution.tool_id, execution.version
                 )
-                outcomes = list(result.all())
                 lifecycle.state, lifecycle.reason = decide_lifecycle_state(
                     lifecycle.state, outcomes
                 )
@@ -312,6 +379,7 @@ class ToolRegistry:
                 tool = await session.get(DBTool, execution.tool_id)
                 response = {
                     "tool_name": tool.name if tool else "unknown",
+                    "version": execution.version,
                     "execution_id": execution.id,
                     "state": lifecycle.state,
                     "reason": lifecycle.reason,
@@ -320,7 +388,7 @@ class ToolRegistry:
             await session.commit()
             return response
 
-    async def get_lifecycle(self, name: str) -> dict | None:
+    async def get_lifecycle(self, name: str, version: int | None = None) -> dict | None:
         async with self.session_factory() as session:
             tool_result = await session.execute(
                 select(DBTool).where(DBTool.name == name)
@@ -328,18 +396,40 @@ class ToolRegistry:
             tool = tool_result.scalar_one_or_none()
             if tool is None:
                 return None
-            lifecycle = await session.get(DBToolLifecycle, tool.id)
+            selected_version = (
+                version if version is not None else tool.current_version
+            )
+            version_result = await session.execute(
+                select(DBToolVersion).where(
+                    DBToolVersion.tool_id == tool.id,
+                    DBToolVersion.version == selected_version,
+                )
+            )
+            version_record = version_result.scalar_one_or_none()
+            if version_record is None:
+                return None
+            lifecycle = await session.get(
+                DBToolVersionLifecycle, (tool.id, selected_version)
+            )
             return {
                 "tool_name": name,
+                "version": selected_version,
+                "code_hash": version_record.code_hash if version_record else None,
                 "state": lifecycle.state if lifecycle else "shared",
                 "reason": (
                     lifecycle.reason
                     if lifecycle
-                    else "Existing tool has legacy shared status"
+                    else "Existing version has legacy shared status"
                 ),
             }
 
-    async def set_lifecycle_state(self, name: str, state: str, reason: str) -> bool:
+    async def set_lifecycle_state(
+        self,
+        name: str,
+        state: str,
+        reason: str,
+        version: int | None = None,
+    ) -> bool:
         if state not in {"candidate", "quarantined", "retired"}:
             raise ValueError("Unsupported lifecycle state")
         async with self.session_factory() as session:
@@ -350,10 +440,26 @@ class ToolRegistry:
                 tool = result.scalar_one_or_none()
                 if tool is None:
                     return False
-                lifecycle = await session.get(DBToolLifecycle, tool.id)
+                selected_version = (
+                    version if version is not None else tool.current_version
+                )
+                version_result = await session.execute(
+                    select(DBToolVersion.version).where(
+                        DBToolVersion.tool_id == tool.id,
+                        DBToolVersion.version == selected_version,
+                    )
+                )
+                if version_result.scalar_one_or_none() is None:
+                    return False
+                lifecycle = await session.get(
+                    DBToolVersionLifecycle, (tool.id, selected_version)
+                )
                 if lifecycle is None:
-                    lifecycle = DBToolLifecycle(
-                        tool_id=tool.id, state=state, reason=reason
+                    lifecycle = DBToolVersionLifecycle(
+                        tool_id=tool.id,
+                        version=selected_version,
+                        state=state,
+                        reason=reason,
                     )
                     session.add(lifecycle)
                 else:
