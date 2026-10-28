@@ -226,6 +226,10 @@ default_risk_threshold = "medium"
 max_file_write_mb = 10
 ```
 
+### Tavily web search (hackathon)
+
+Web-search requests use the built-in Tavily Search API integration; Nanoscrypt does not generate a scraper or switch providers. In the interactive CLI, the first search securely prompts for a Tavily API key and stores it in the operating system credential store when available. The key is never sent to generated code or the Nebius sandbox. If the credential store is unavailable, the key is kept for the current CLI process only. For non-interactive/API runs, set `TAVILY_API_KEY` in the environment or local `.env` file. Search requests retain the normal web-access approval gate.
+
 ### Harness sessions
 
 The harness runs bounded turns, carries recent conversation into queued follow-ups, and saves session messages and tool history under `.nanoscrypt_sessions/` inside the configured workspace root. Reuse a session with `nanoscrypt run --session-id <id> "..."`; `/clear` clears its saved conversation and tool history. The default turn limit is 12 and can be changed with `runtime.max_agent_turns`.

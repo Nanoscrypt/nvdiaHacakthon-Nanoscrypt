@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     nebius_project_id: str | None = Field(
         default=None, validation_alias="NEBIUS_PROJECT_ID"
     )
+    tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
     llm: LLMSettings = Field(default_factory=LLMSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     registry: RegistrySettings = Field(default_factory=RegistrySettings)

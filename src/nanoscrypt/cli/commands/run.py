@@ -326,6 +326,28 @@ def run_cmd(
             status.start()
             status_active = True
 
+            def cli_tavily_api_key_callback():
+                nonlocal status_active
+                if status_active:
+                    status.stop()
+                    status_active = False
+                console.print("\n[cyan]Tavily web search needs an API key.[/cyan]")
+                if not sys.stdin.isatty():
+                    return None
+                try:
+                    key = typer.prompt("Tavily API key", hide_input=True).strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
+                if not key:
+                    return None
+                if status_active is False:
+                    status.update("Continuing with Tavily search…")
+                    status.start()
+                    status_active = True
+                return key
+
+            orchestrator.tavily_api_key_callback = cli_tavily_api_key_callback
+
             # Setup interactive console approval handler
             def cli_approval_callback(req: ApprovalRequest) -> bool:
                 nonlocal status_active
