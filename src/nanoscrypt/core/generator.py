@@ -46,9 +46,11 @@ class ToolGenerator:
                 **kwargs,
             )
 
-            # Ensure name matches specification
-            if decision.tool_name and not generated_tool.name:
+            # A parser fallback such as "unnamed_tool" is truthy, so treat it
+            # as missing and preserve the planner's requested tool name.
+            if decision.tool_name and generated_tool.name.strip().lower() in {"", "unnamed_tool", "tool"}:
                 generated_tool.name = decision.tool_name
+                generated_tool.manifest.name = decision.tool_name
 
             log.info(
                 "tool_generation_completed",

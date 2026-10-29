@@ -33,6 +33,13 @@ def classify_error(stderr: str, timed_out: bool, user_prompt: str = "") -> tuple
         return "unknown", "No error message captured. The process exited with a non-zero status code."
 
     err_lower = stderr.lower()
+    if "entry point" in err_lower and "run" in err_lower:
+        return "entry_point", (
+            "The generated tool must define a module-level function named run. "
+            "Put `def run(...):` (or `async def run(...)`) at the top level of the "
+            "<code> section, not inside a class, another function, or a conditional. "
+            "Make its parameter names match the manifest input_schema exactly."
+        )
     if "syntaxerror" in stderr or "invalid syntax" in err_lower:
         return "syntax_error", (
             "The code has a Python syntax error. Check for missing colons, unmatched "
@@ -342,6 +349,8 @@ class RepairLoop:
         current_failure = failure_result
         attempt = 0
         current_parent_repair_id: int | None = None
+        previous_validation_signature: tuple[str, ...] | None = None
+        repeated_validation_count = 0
 
         max_attempts = settings.resilience.max_repair_attempts
         backoff_delay = settings.resilience.retry_delay_seconds
@@ -440,7 +449,18 @@ class RepairLoop:
                 val_res = self.validator.validate(patched_tool)
                 if not val_res.is_valid:
                     error_msgs = [f"[{iss.stage}] {iss.message}" for iss in val_res.issues if iss.severity == "error"]
-                    log.warning("repair_validation_failed", attempt=attempt, validation_errors=error_msgs)
+                    signature = tuple(error_msgs)
+                    if signature == previous_validation_signature:
+                        repeated_validation_count += 1
+                    else:
+                        previous_validation_signature = signature
+                        repeated_validation_count = 1
+                    log.warning(
+                        "repair_validation_failed",
+                        attempt=attempt,
+                        validation_errors=error_msgs,
+                        consecutive_same_validation_failures=repeated_validation_count,
+                    )
                     validation_errors = "\n".join([f"[{iss.stage}] {iss.message}" for iss in val_res.issues])
 
                     # Record this failed attempt in history
@@ -478,8 +498,18 @@ class RepairLoop:
                         workspace_path=failure_result.workspace_path,
                     )
                     current_tool = patched_tool
+                    if repeated_validation_count >= 2:
+                        log.error(
+                            "repair_stopped_repeated_validation_failure",
+                            attempt=attempt,
+                            validation_errors=error_msgs,
+                        )
+                        return None, attempt
                     continue
 
+                # A new valid candidate resets the consecutive validation-failure guard.
+                previous_validation_signature = None
+                repeated_validation_count = 0
                 if val_res.formatted_code:
                     patched_tool.code = val_res.formatted_code
 

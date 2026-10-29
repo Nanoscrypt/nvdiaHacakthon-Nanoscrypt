@@ -233,13 +233,13 @@ class LiteLLMProvider(LLMProvider):
                 max_tokens=tokens,
                 **kwargs
             )
-            
+
             def strip_markdown_code_block(text: str) -> str:
                 text = text.strip()
                 if text.startswith("```"):
                     newline_idx = text.find("\n")
                     if newline_idx != -1:
-                        text = text[newline_idx+1:].strip()
+                        text = text[newline_idx + 1 :].strip()
                     else:
                         text = text[3:].strip()
                 if text.endswith("```"):
@@ -247,49 +247,117 @@ class LiteLLMProvider(LLMProvider):
                 return text.strip()
 
             def extract_tag(tag: str) -> str:
-                pattern = rf"<{tag}>(.*?)</{tag}>"
-                matches = list(re.finditer(pattern, raw_response, re.DOTALL))
+                pattern = rf"<\s*{re.escape(tag)}\b[^>]*>(.*?)</\s*{re.escape(tag)}\s*>"
+                matches = list(re.finditer(pattern, raw_response, re.IGNORECASE | re.DOTALL))
                 return matches[-1].group(1).strip() if matches else ""
 
-            name = strip_markdown_code_block(extract_tag("tool_name"))
-            code = strip_markdown_code_block(extract_tag("code"))
+            # Models sometimes return the requested fields as JSON despite the XML
+            # contract. Parse that form before falling back to code fences.
+            json_payload = None
+            json_candidates = [raw_response.strip()]
+            json_candidates.extend(
+                match.group(1).strip()
+                for match in re.finditer(r"```(?:json)?\s*(.*?)```", raw_response, re.IGNORECASE | re.DOTALL)
+            )
+            for candidate in json_candidates:
+                candidate = strip_markdown_code_block(candidate)
+                try:
+                    parsed = json.loads(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(parsed, dict):
+                    json_payload = parsed
+                    break
+
+            def json_field(*names: str, default: Any = "") -> Any:
+                if not isinstance(json_payload, dict):
+                    return default
+                for field_name in names:
+                    value = json_payload.get(field_name)
+                    if value is not None:
+                        return value
+                return default
+
+            name = strip_markdown_code_block(extract_tag("tool_name")) or str(
+                json_field("tool_name", "name", default="")
+            ).strip()
+            code = strip_markdown_code_block(extract_tag("code")) or str(
+                json_field("code", "source", "implementation", default="")
+            )
+            requirements_value = json_field("requirements", default=None)
             requirements_raw = strip_markdown_code_block(extract_tag("requirements"))
-            manifest_raw = strip_markdown_code_block(extract_tag("manifest"))
-            tests = strip_markdown_code_block(extract_tag("tests"))
-            readme = strip_markdown_code_block(extract_tag("readme"))
+            if requirements_value is not None:
+                if isinstance(requirements_value, list):
+                    requirements = [str(item).strip() for item in requirements_value if str(item).strip()]
+                else:
+                    requirements = [line.strip() for line in str(requirements_value).splitlines() if line.strip()]
+            else:
+                requirements = [line.strip() for line in requirements_raw.splitlines() if line.strip()]
+
+            manifest_value = json_field("manifest", default=None)
+            manifest_raw = extract_tag("manifest")
+            manifest = None
+            try:
+                if isinstance(manifest_value, dict):
+                    manifest = ToolManifest(**manifest_value)
+                elif manifest_raw:
+                    manifest = ToolManifest(**json.loads(manifest_raw))
+                elif isinstance(manifest_value, str) and manifest_value.strip():
+                    manifest = ToolManifest(**json.loads(manifest_value))
+            except (TypeError, ValueError):
+                manifest = None
+
+            tests = strip_markdown_code_block(extract_tag("tests")) or str(
+                json_field("tests", default="")
+            )
+            readme = strip_markdown_code_block(extract_tag("readme")) or str(
+                json_field("readme", default="")
+            )
 
             if not code:
-                code_match = re.search(r"```python(.*?)```", raw_response, re.DOTALL)
-                if code_match:
-                    code = code_match.group(1).strip()
+                fenced_blocks = [
+                    match.group(1).strip()
+                    for match in re.finditer(r"```(?:[\w+-]+)?\s*(.*?)```", raw_response, re.DOTALL)
+                ]
+                run_pattern = re.compile(r"(?m)^\s*(?:async\s+)?def\s+run\s*\(")
+                code = next((block for block in fenced_blocks if run_pattern.search(block)), "")
+                if not code:
+                    # Accept a response that is itself Python source, but never treat
+                    # surrounding XML/JSON prose as executable code.
+                    plain_source = raw_response.strip()
+                    if run_pattern.search(plain_source) and not re.search(r"</?\w+[^>]*>", plain_source):
+                        code = plain_source
 
-            requirements = [r.strip() for r in requirements_raw.splitlines() if r.strip()]
-
-            manifest = None
-            if manifest_raw:
-                try:
-                    manifest_clean = manifest_raw
-                    manifest_dict = json.loads(manifest_clean)
-                    manifest = ToolManifest(**manifest_dict)
-                except Exception:
-                    pass
-
+            if not name:
+                name = str(json_field("tool_name", "name", default="unnamed_tool")).strip() or "unnamed_tool"
             if not manifest:
                 manifest = ToolManifest(
-                    name=name or "unnamed_tool",
+                    name=name,
                     dependencies=requirements,
                     input_schema={},
                     output_schema={},
-                    network=True if any(x in requirements for x in ["requests", "httpx", "urllib"]) else False
+                    network=any(item.split("=", 1)[0].lower() in {"requests", "httpx"} for item in requirements),
+                )
+
+            has_run = bool(re.search(r"(?m)^\s*(?:async\s+)?def\s+run\s*\(", code))
+            if not code or not has_run:
+                logger.warning(
+                    "generated_tool_response_contract_incomplete",
+                    tool_name=name,
+                    code_found=bool(code),
+                    run_found=has_run,
+                    response_chars=len(raw_response),
+                    xml_code_tag_found=bool(extract_tag("code")),
+                    json_object_found=isinstance(json_payload, dict),
                 )
 
             return GeneratedTool(
-                name=name or "unnamed_tool",
+                name=name,
                 code=code,
                 requirements=requirements,
                 manifest=manifest,
                 tests=tests,
-                readme=readme
+                readme=readme,
             )
 
         if "timeout" not in kwargs:

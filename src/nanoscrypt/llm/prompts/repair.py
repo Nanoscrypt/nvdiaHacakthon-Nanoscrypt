@@ -205,4 +205,5 @@ CRITICAL REMINDERS:
 3. Follow the repair strategy: {strategy}.
 4. Apply ALL mandatory coding standards: type hints, input validation, encoding, timeouts, retries, error dicts.
 5. Write self-contained tests with strong structural assertions.
+6. The <code> section MUST define a module-level `def run(...):` or `async def run(...):` entry point; do not place it inside a class or another function. Match its parameters exactly to manifest input_schema.
 """

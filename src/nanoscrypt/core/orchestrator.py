@@ -1139,7 +1139,7 @@ class Orchestrator:
 
                     self.runtime_manager.setup_workspace(session.id, target_tool)
 
-                    repaired, _ = await self.repair_loop.repair_tool(
+                    repaired, repair_attempts = await self.repair_loop.repair_tool(
                         session_id=session.id,
                         tool=target_tool,
                         failure_result=dummy_failure,
@@ -1150,15 +1150,22 @@ class Orchestrator:
                         target_tool = repaired
                         val_result = self.validator.validate(target_tool)
                     else:
+                        error_text = "; ".join(errors) or "The generated tool failed validation."
                         return {
                             "status": "failed",
                             "action_taken": "validation",
+                            "error": (
+                                f"Generated tool did not pass validation or sandbox tests "
+                                f"after {repair_attempts} repair attempt(s). Initial validation: {error_text}"
+                            ),
                             "errors": errors,
                         }
                 else:
+                    error_text = "; ".join(errors) or "The generated tool failed validation."
                     return {
                         "status": "failed",
                         "action_taken": "validation",
+                        "error": error_text,
                         "errors": errors,
                     }
 
